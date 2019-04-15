@@ -2,7 +2,7 @@
 
 import { createLocation, createKey } from './location-utils';
 import { RouterHistory, LocationSegments, Prompt } from '../global/interfaces';
-import { invariant, warning } from './log';
+import { warning } from './log';
 import {
   addLeadingSlash,
   stripTrailingSlash,
@@ -13,9 +13,6 @@ import {
 import createTransitionManager from './createTransitionManager';
 import createScrollHistory from './createScrollHistory';
 import {
-  canUseDOM,
-  addEventListener,
-  removeEventListener,
   getConfirmation,
   supportsHistory,
   supportsPopStateOnHashChange,
@@ -37,9 +34,9 @@ interface NextState {
 const PopStateEvent = 'popstate';
 const HashChangeEvent = 'hashchange';
 
-const getHistoryState = () => {
+const getHistoryState = (win: Window) => {
   try {
-    return window.history.state || {};
+    return win.history.state || {};
   } catch (e) {
     // IE 11 sometimes throws when accessing window.history.state
     // See https://github.com/ReactTraining/history/pull/289
@@ -51,26 +48,23 @@ const getHistoryState = () => {
  * Creates a history object that uses the HTML5 history API including
  * pushState, replaceState, and the popstate event.
  */
-const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHistory => {
-  invariant(
-    canUseDOM,
-    'Browser history needs a DOM'
-  );
+const createBrowserHistory = (win: Window, props: CreateBrowserHistoryOptions = {}): RouterHistory => {
+  let forceNextPop = false;
 
-  const globalHistory = window.history;
-  const canUseHistory = supportsHistory();
-  const needsHashChangeListener = !supportsPopStateOnHashChange();
-  const scrollHistory = createScrollHistory();
+  const globalHistory = win.history;
+  const canUseHistory = supportsHistory(win);
+  const needsHashChangeListener = !supportsPopStateOnHashChange(win.navigator);
+  const scrollHistory = createScrollHistory(win);
 
   const forceRefresh = (props.forceRefresh != null) ? props.forceRefresh : false;
   const getUserConfirmation = (props.getUserConfirmation != null) ? props.getUserConfirmation : getConfirmation;
   const keyLength = (props.keyLength != null) ? props.keyLength : 6;
   const basename = props.basename ? stripTrailingSlash(addLeadingSlash(props.basename)) : '';
 
-  const getDOMLocation = (historyState: LocationSegments) => {
+  const getDOMLocation = (win: Window, historyState: LocationSegments) => {
     historyState = historyState || {};
     const { key, state } = historyState;
-    const { pathname, search, hash } = window.location;
+    const { pathname, search, hash } = win.location;
 
     let path = pathname + search + hash;
 
@@ -109,18 +103,15 @@ const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHi
 
   const handlePopState = (event: any) => {
     // Ignore extraneous popstate events in WebKit.
-    if (isExtraneousPopstateEvent(event)) {
-      return;
+    if (!isExtraneousPopstateEvent(win.navigator, event)) {
+      handlePop(getDOMLocation(win, event.state));
     }
-
-    handlePop(getDOMLocation(event.state));
   };
 
   const handleHashChange = () => {
-    handlePop(getDOMLocation(getHistoryState()));
+    handlePop(getDOMLocation(win, getHistoryState(win)));
   };
 
-  let forceNextPop = false;
 
   const handlePop = (location: LocationSegments) => {
     if (forceNextPop) {
@@ -166,8 +157,10 @@ const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHi
     }
   };
 
-  const initialLocation = getDOMLocation(getHistoryState());
+  const initialLocation = getDOMLocation(win, getHistoryState(win));
   let allKeys = [ initialLocation.key ];
+  let listenerCount = 0;
+  let isBlocked = false;
 
   // Public interface
 
@@ -194,10 +187,10 @@ const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHi
       const { key, state } = location;
 
       if (canUseHistory) {
-        globalHistory.pushState({ key, state }, undefined, href);
+        globalHistory.pushState({ key, state }, '', href);
 
         if (forceRefresh) {
-          window.location.href = href;
+          win.location.href = href;
         } else {
           const prevIndex = allKeys.indexOf(history.location.key);
           const nextKeys = allKeys.slice(0, prevIndex === -1 ? 0 : prevIndex + 1);
@@ -213,7 +206,7 @@ const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHi
           'Browser history cannot push state in browsers that do not support HTML5 history'
         );
 
-        window.location.href = href;
+        win.location.href = href;
       }
     });
   };
@@ -237,10 +230,10 @@ const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHi
       const { key, state } = location;
 
       if (canUseHistory) {
-        globalHistory.replaceState({ key, state }, undefined, href);
+        globalHistory.replaceState({ key, state }, '', href);
 
         if (forceRefresh) {
-          window.location.replace(href);
+          win.location.replace(href);
         } else {
           const prevIndex = allKeys.indexOf(history.location.key);
 
@@ -256,7 +249,7 @@ const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHi
           'Browser history cannot replace state in browsers that do not support HTML5 history'
         );
 
-        window.location.replace(href);
+        win.location.replace(href);
       }
     });
   };
@@ -268,27 +261,24 @@ const createBrowserHistory = (props: CreateBrowserHistoryOptions = {}): RouterHi
   const goBack = () => go(-1);
   const goForward = () => go(1);
 
-  let listenerCount = 0;
 
   const checkDOMListeners = (delta: number) => {
     listenerCount += delta;
 
     if (listenerCount === 1) {
-      addEventListener(window, PopStateEvent, handlePopState);
+      win.addEventListener(PopStateEvent, handlePopState);
 
       if (needsHashChangeListener) {
-        addEventListener(window, HashChangeEvent, handleHashChange);
+        win.addEventListener(HashChangeEvent, handleHashChange);
       }
     } else if (listenerCount === 0) {
-      removeEventListener(window, PopStateEvent, handlePopState);
+      win.removeEventListener(PopStateEvent, handlePopState);
 
       if (needsHashChangeListener) {
-        removeEventListener(window, HashChangeEvent, handleHashChange);
+        win.removeEventListener(HashChangeEvent, handleHashChange);
       }
     }
   };
-
-  let isBlocked = false;
 
   const block = (prompt: string | Prompt = '') => {
     const unblock = transitionManager.setPrompt(prompt);
